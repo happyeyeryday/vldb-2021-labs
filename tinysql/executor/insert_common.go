@@ -668,7 +668,8 @@ func (e *InsertValues) addRecord(ctx context.Context, row []types.Datum) (int64,
 	var recordID int64
 	// Hint: step II.5
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	recordID, err = e.Table.AddRecord(e.ctx, row, table.WithCtx(ctx))//将输入的一行数据通过 `table/tables/tables.go` 中的 `TableCommon.AddRecord` 函数写入到 membuffer 当中
 	txn.DelOption(kv.PresumeKeyNotExists)
 	if err != nil {
 		return 0, err

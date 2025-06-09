@@ -85,7 +85,8 @@ func (e *SimpleExec) executeBegin(ctx context.Context, s *ast.BeginStmt) error {
 		var err error
 		// Hint: step I.5.1
 		// YOUR CODE HERE (lab4)
-		panic("YOUR CODE HERE")
+		//panic("YOUR CODE HERE")
+		err = e.ctx.NewTxn(ctx)//创建一个新的事务，如果此时这个 session 中有尚未提交的事务，`NewTxn` 会先提交事务后开启一个新事务
 		if err != nil {
 			return err
 		}
@@ -98,14 +99,17 @@ func (e *SimpleExec) executeBegin(ctx context.Context, s *ast.BeginStmt) error {
 	var err error
 	// Hint: step I.5.1
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	_, err = e.ctx.Txn(true)//通过 `session.Txn` 函数（也被定义在 `sessionctx.Context` 接口中）等待这个事务获取到 `startTS`
 	return err
 }
 
 func (e *SimpleExec) executeCommit(s *ast.CommitStmt) {
 	// Hint: step I.5.2
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	sessVars := e.ctx.GetSessionVars()
+	sessVars.SetStatusFlag(mysql.ServerStatusInTrans, false)
 }
 
 func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
@@ -119,7 +123,8 @@ func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
 
 	// Hint: step I.5.3
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	txn, err = e.ctx.Txn(false)//通过 `session.Txn` 函数来获取当前事务，但是不会等待事务激活
 	if err != nil {
 		return err
 	}
@@ -127,7 +132,8 @@ func (e *SimpleExec) executeRollback(s *ast.RollbackStmt) error {
 		sessVars.TxnCtx.ClearDelta()
 		// Hint: step I.5.3
 		// YOUR CODE HERE (lab4)
-		panic("YOUR CODE HERE")
+		//panic("YOUR CODE HERE")
+		err = txn.Rollback()// 调用这个事务的 Rollback 方法进行清理
 		return err
 	}
 	return nil
