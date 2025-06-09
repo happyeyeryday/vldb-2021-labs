@@ -356,10 +356,12 @@ func (p *peer) TakeApplyProposals() *MsgApplyProposal {
 }
 
 func (p *peer) HandleRaftReady(msgs []message.Msg, pdScheduler chan<- worker.Task, trans Transport) (*ApplySnapResult, []message.Msg) {
+
 	if p.stopped {
 		return nil, msgs
 	}
 
+	// 如果有快照但尚未准备好，则记录日志并返回，等待下一次处理
 	if p.HasPendingSnapshot() && !p.ReadyToHandlePendingSnap() {
 		log.Debug(fmt.Sprintf("%v [apply_id: %v, last_applying_idx: %v] is not ready to apply snapshot.", p.Tag, p.peerStorage.AppliedIndex(), p.LastApplyingIdx))
 		return nil, msgs
@@ -367,8 +369,13 @@ func (p *peer) HandleRaftReady(msgs []message.Msg, pdScheduler chan<- worker.Tas
 
 	// YOUR CODE HERE (lab1). There are some missing code pars marked with `Hint` above, try to finish them.
 	// Hint1: check if there's ready to be processed, if no return directly.
-	panic("not implemented yet")
+	// panic("not implemented yet")
+	if !p.RaftGroup.HasReady() { // tinykv/raft/rawnode.go
+		log.Debug(fmt.Sprintf("%v no raft ready", p.Tag))
+		return nil, msgs
+	}
 
+	// 开始处理 ready 状态
 	// Start to handle the raft ready.
 	log.Debug(fmt.Sprintf("%v handle raft ready", p.Tag))
 
@@ -376,29 +383,45 @@ func (p *peer) HandleRaftReady(msgs []message.Msg, pdScheduler chan<- worker.Tas
 	// TODO: workaround for:
 	//   in kvproto/eraftpb, we use *SnapshotMetadata
 	//   but in etcd, they use SnapshotMetadata
+	// 如果 Ready 中包含快照，但元数据为空，则初始化元数据（兼容性处理）
 	if ready.Snapshot.GetMetadata() == nil {
 		ready.Snapshot.Metadata = &eraftpb.SnapshotMetadata{}
 	}
 
 	// The leader can write to disk and replicate to the followers concurrently
 	// For more details, check raft thesis 10.2.1.
+	// 如果当前节点是领导者（IsLeader 返回 true）：
 	if p.IsLeader() {
-		p.Send(trans, ready.Messages)
-		ready.Messages = ready.Messages[:0]
-	}
-	ss := ready.SoftState
-	if ss != nil && ss.RaftState == raft.StateLeader {
-		p.HeartbeatScheduler(pdScheduler)
+		p.Send(trans, ready.Messages)       // 将 Ready 中的消息通过传输层（trans）发送给其他节点。
+		ready.Messages = ready.Messages[:0] // 清空消息，避免重复发送
 	}
 
+	// 处理软状态（如果ready中包含）
+
+	// 软状态（Soft State） 是一种 非持久化 的、在内存中维护的运行时状态信息。
+	// 与硬状态（Hard State）相比，软状态不需要被持久化到存储中，因为它可以在节点重启后通过 Raft 协议重新推导或恢复
+	// 软状态的主要内容：1.节点角色（RaftState）2.领导者信息（LeaderID）3.选举超时计时器（ElectionElapsed）4.心跳计时器（HeartbeatElapsed）
+
+	// 为什么在软状态变化时发送心跳？
+	// 软状态的变化可能表示以下情况：
+	// 1.当前节点刚刚成为领导者（RaftState == Leader）
+	// 2.需要通知其他节点当前的领导者是谁，以及维持领导者状态
+	ss := ready.SoftState
+	if ss != nil && ss.RaftState == raft.StateLeader {
+		p.HeartbeatScheduler(pdScheduler) // 发送心跳任务，通知其他节点该节点仍然是领导者
+	}
+
+	// 持久化日志条目和快照，防止数据丢失，更新硬状态，确保系统崩溃后可以正确恢复
 	applySnapResult, err := p.peerStorage.SaveReadyState(&ready)
 	if err != nil {
 		panic(fmt.Sprintf("failed to handle raft ready, error: %v", err))
 	}
-	if !p.IsLeader() {
+	if !p.IsLeader() { // 如果当前节点不是领导者，再次发送消息，确保日志或快照同步
 		p.Send(trans, ready.Messages)
 	}
 
+	// 处理快照和日志条目，确保状态机的正确更新，优先处理快照
+	// 如果快照应用成功（applySnapResult != nil），则生成一个刷新消息并加入消息队列，并更新快照的应用索引
 	if applySnapResult != nil {
 		/// Register self to applyMsgs so that the peer is then usable.
 		msgs = append(msgs, message.NewPeerMsg(message.MsgTypeApplyRefresh, p.regionId, &MsgApplyRefresh{
@@ -408,13 +431,15 @@ func (p *peer) HandleRaftReady(msgs []message.Msg, pdScheduler chan<- worker.Tas
 		}))
 
 		// Snapshot's metadata has been applied.
+		// 快照的元数据已经被应用，更新应用索引
 		p.LastApplyingIdx = p.peerStorage.truncatedIndex()
-	} else {
+	} else { // 没有新的快照应用，则处理 Ready 中的已提交日志条目
 		committedEntries := ready.CommittedEntries
 		ready.CommittedEntries = nil
 		l := len(committedEntries)
 		if l > 0 {
 			p.LastApplyingIdx = committedEntries[l-1].Index
+			// 通知状态机执行提交的日志条目
 			msgs = append(msgs, message.Msg{Type: message.MsgTypeApplyCommitted, Data: &MsgApplyCommitted{
 				regionId: p.regionId,
 				term:     p.Term(),
@@ -426,9 +451,11 @@ func (p *peer) HandleRaftReady(msgs []message.Msg, pdScheduler chan<- worker.Tas
 	// YOUR CODE HERE (lab1). There are some missing code pars marked with `Hint` above, try to finish them.
 	// Hint2: Try to advance the states in the raft group of this peer after processing the raft ready.
 	//        Check about the `Advance` method in for the raft group.
-	panic("not implemented yet")
+	// 推进 Raft 的状态，使其知道之前的 Ready 状态已经被处理，进入下一步
+	p.RaftGroup.Advance(ready)
 
 	return applySnapResult, msgs
+
 }
 
 func (p *peer) MaybeCampaign(parentIsLeader bool) bool {

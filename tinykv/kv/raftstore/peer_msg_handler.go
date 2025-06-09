@@ -617,20 +617,90 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+// proposeRaftCommand 处理客户端的 Raft 命令提议请求
+// 这是分布式共识的入口方法，负责：
+// 1. 验证命令的合法性（权限、任期、区域等检查）
+// 2. 确保节点状态正常（未停止、能够处理请求）
+// 3. 将命令提议给 Raft 组进行共识处理
+//
+// 在分布式系统中，只有通过 Raft 共识的命令才能被执行，
+// 这保证了数据的一致性和系统的可靠性。
+//
+// 参数说明：
+//   msg: 客户端发送的 Raft 命令请求
+//   cb: 回调函数，用于返回处理结果给客户端
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	panic("not implemented yet")
-	// YOUR CODE HERE (lab1).
-	// Hint1: do `preProposeRaftCommand` check for the command, if the check fails, need to execute the
-	// callback function and return the error results. `ErrResp` is useful to generate error response.
+    // YOUR CODE HERE (lab1).
+    
+    // === 第一步：命令预检查 ===
+    // Hint1: do `preProposeRaftCommand` check for the command, if the check fails, need to execute the
+    // callback function and return the error results. `ErrResp` is useful to generate error response.
+    
+    // 执行命令的前置验证，包括：
+    // - 存储 ID 检查：确保消息发送到正确的存储节点
+    // - 领导者检查：只有领导者才能处理写请求
+    // - 节点 ID 检查：确保消息发送到正确的节点
+    // - 任期检查：防止处理过期的请求
+    // - 区域纪元检查：确保区域信息是最新的
+    commandCheckError := d.preProposeRaftCommand(msg) 
+    if commandCheckError != nil {
+        // 如果任何检查失败，立即通过回调返回错误响应
+        log.Warn(fmt.Sprintf("[region %d] Command validation failed: %v", d.regionId, commandCheckError))
+        cb.Done(ErrResp(commandCheckError))
+        return
+    }
 
-	// Hint2: Check if peer is stopped already, if so notify the callback that the region is removed, check
-	// the `destroy` function for related utilities. `NotifyReqRegionRemoved` is useful to generate error response.
+    // === 第二步：节点状态检查 ===
+    // Hint2: Check if peer is stopped already, if so notify the callback that the region is removed, check
+    // the `destroy` function for related utilities. `NotifyReqRegionRemoved` is useful to generate error response.
 
-	// Hint3: Bind the possible response with term then do the real requests propose using the `Propose` function.
-	// Note:
-	// The peer that is being checked is a leader. It might step down to be a follower later. It
-	// doesn't matter whether the peer is a leader or not. If it's not a leader, the proposing
-	// command log entry can't be committed. There are some useful information in the `ctx` of the `peerMsgHandler`.
+    // 检查当前节点是否已经停止服务
+    // 如果节点已停止，需要清理资源并通知客户端区域已被移除
+    if d.stopped {
+        log.Warn(fmt.Sprintf("[region %d] Node has been stopped, cannot process requests", d.regionId))
+        
+        // 尝试清理节点资源
+        destroyError := d.Destroy(d.ctx.engine, false) 
+        if destroyError != nil {
+            log.Error(fmt.Sprintf("[region %d] Failed to destroy stopped node: %v", d.regionId, destroyError))
+        }
+        
+        // 通知客户端该区域已被移除，无法继续处理请求
+        NotifyReqRegionRemoved(d.regionId, cb)
+        return
+    }
+
+    // === 第三步：准备响应并提交提议 ===
+    // Hint3: Bind the possible response with term then do the real requests propose using the `Propose` function.
+    // 提议请求时，需要将当前的 Raft term（任期）信息绑定到响应中
+    // Note:
+    // The peer that is being checked is a leader. It might step down to be a follower later. It
+    // doesn't matter whether the peer is a leader or not. If it's not a leader, the proposing
+    // command log entry can't be committed. There are some useful information in the `ctx` of the `peerMsgHandler`.
+
+    // 创建命令响应对象并绑定当前任期
+    // 任期信息用于客户端检测领导者变更和处理网络分区场景
+    commandResponse := newCmdResp()
+    BindRespTerm(commandResponse, d.Term())
+
+    // 将命令提议给 Raft 组进行共识处理
+    // Propose 方法会：
+    // 1. 将命令添加到 Raft 日志
+    // 2. 尝试与其他节点达成共识
+    // 3. 在命令被提交后执行回调
+    proposalSuccessful := d.peer.Propose(d.ctx.engine.Raft, d.ctx.cfg, cb, msg, commandResponse)
+    
+    if !proposalSuccessful {
+        // 提议失败可能的原因：
+        // - 节点不再是领导者
+        // - Raft 组状态异常
+        // - 系统资源不足
+        log.Warn(fmt.Sprintf("[region %d] Failed to propose command to Raft group", d.regionId))
+        return
+    }
+
+    // 提议成功提交到 Raft，等待共识完成
+    log.Debug(fmt.Sprintf("[region %d] Command successfully proposed to Raft group", d.regionId))
 }
 
 func (d *peerMsgHandler) findSiblingRegion() (result *metapb.Region) {
