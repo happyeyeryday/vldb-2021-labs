@@ -1144,17 +1144,37 @@ func (m *ScanResponse) GetPairs() []*KvPair {
 	return nil
 }
 
-// Rollback an un-committed transaction. Will fail if the transaction has already
-// been committed or keys are locked by a different transaction. If the keys were never
-// locked, no action is needed but it is not an error.  If successful all keys will be
-// unlocked and all uncommitted values removed.
+// BatchRollbackRequest 定义了批量回滚事务的请求结构
+// 用于回滚一个未提交的事务，清理该事务产生的所有锁和未提交的数据
+//
+// 回滚操作的行为特点：
+// - 如果事务已经提交，回滚操作会失败
+// - 如果键被其他事务锁定，回滚操作会失败  
+// - 如果键从未被锁定，不执行任何操作但不报错
+// - 成功时会解锁所有键并移除所有未提交的值
+//
+// 这是 Percolator 事务模型中清理阶段的核心操作，主要用于：
+// 1. 事务主动回滚时清理所有相关资源
+// 2. 事务超时或发生冲突时的自动清理
+// 3. 系统崩溃后的事务恢复清理
 type BatchRollbackRequest struct {
-	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-	StartVersion         uint64   `protobuf:"varint,2,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
-	Keys                 [][]byte `protobuf:"bytes,3,rep,name=keys" json:"keys,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+    // Context 包含请求的上下文信息，如 Region ID、Peer 信息等
+    // 用于路由请求到正确的存储节点
+    Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+    
+    // StartVersion 是要回滚的事务的开始时间戳
+    // 这个时间戳唯一标识一个事务，用于匹配需要回滚的锁和数据
+    StartVersion         uint64   `protobuf:"varint,2,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
+    
+    // Keys 是需要回滚的键列表
+    // 对于分布式事务，这通常包含该 Region 内所有属于该事务的键
+    // 每个键都会被检查并清理其对应的锁和未提交数据
+    Keys                 [][]byte `protobuf:"bytes,3,rep,name=keys" json:"keys,omitempty"`
+    
+    // Protocol Buffers 生成的内部字段，用于序列化优化
+    XXX_NoUnkeyedLiteral struct{} `json:"-"`
+    XXX_unrecognized     []byte   `json:"-"`
+    XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *BatchRollbackRequest) Reset()         { *m = BatchRollbackRequest{} }
@@ -1211,13 +1231,34 @@ func (m *BatchRollbackRequest) GetKeys() [][]byte {
 	return nil
 }
 
-// Empty if the rollback is successful.
+// BatchRollbackResponse 定义了批量回滚事务的响应结构
+// 当回滚成功时，该响应体通常是空的（仅包含成功状态）
+// 当回滚失败时，会包含相应的错误信息
+//
+// 响应的处理逻辑：
+// - 如果 RegionError 不为空，表示 Region 级别的错误（如 Region 不存在、权限问题等）
+// - 如果 Error 不为空，表示键级别的错误（如锁冲突、事务状态异常等）
+// - 如果两个错误字段都为空，表示批量回滚操作成功完成
+//
+// 这个响应是 Percolator 事务模型中清理操作的反馈，用于通知客户端：
+// 1. 回滚操作是否成功执行
+// 2. 如果失败，具体的失败原因和错误类型
+// 3. 客户端可以根据错误类型决定是否重试
 type BatchRollbackResponse struct {
-	RegionError          *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
-	Error                *KeyError      `protobuf:"bytes,2,opt,name=error" json:"error,omitempty"`
-	XXX_NoUnkeyedLiteral struct{}       `json:"-"`
-	XXX_unrecognized     []byte         `json:"-"`
-	XXX_sizecache        int32          `json:"-"`
+    // RegionError 表示 Region 级别的错误
+    // 当请求的 Region 不存在、发生分裂、或者网络问题时会设置此字段
+    // 客户端收到此错误时通常需要重新获取 Region 信息并重试请求
+    RegionError          *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
+    
+    // Error 表示键级别的具体错误信息
+    // 包含锁冲突、写冲突、事务状态异常等与业务逻辑相关的错误
+    // 客户端需要根据错误类型决定后续处理策略（重试、回滚、报错等）
+    Error                *KeyError      `protobuf:"bytes,2,opt,name=error" json:"error,omitempty"`
+    
+    // Protocol Buffers 生成的内部字段，用于序列化和性能优化
+    XXX_NoUnkeyedLiteral struct{}       `json:"-"`
+    XXX_unrecognized     []byte         `json:"-"`
+    XXX_sizecache        int32          `json:"-"`
 }
 
 func (m *BatchRollbackResponse) Reset()         { *m = BatchRollbackResponse{} }
@@ -1267,19 +1308,41 @@ func (m *BatchRollbackResponse) GetError() *KeyError {
 	return nil
 }
 
-// CheckTxnStatus reports on the status of a transaction and may take action to
-// rollback expired locks.
-// If the transaction has previously been rolled back or committed, return that information.
-// If the TTL of the transaction is exhausted, abort that transaction and roll back the primary lock.
-// Otherwise, returns the TTL information.
+// CheckTxnStatusRequest 定义了检查事务状态的请求结构
+// 用于查询事务的当前状态，并在必要时对过期的锁进行清理操作
+//
+// 该请求的处理逻辑：
+// - 如果事务已经被回滚或提交，返回相应的状态信息
+// - 如果事务的 TTL 已过期，自动中止该事务并回滚主键锁
+// - 否则，返回事务的 TTL 信息
+//
+// 这是 Percolator 事务模型中的重要操作，主要用于：
+// 1. 检测事务是否仍然活跃
+// 2. 清理过期的事务锁
+// 3. 防止死锁和资源泄露
 type CheckTxnStatusRequest struct {
-	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-	PrimaryKey           []byte   `protobuf:"bytes,2,opt,name=primary_key,json=primaryKey,proto3" json:"primary_key,omitempty"`
-	LockTs               uint64   `protobuf:"varint,3,opt,name=lock_ts,json=lockTs,proto3" json:"lock_ts,omitempty"`
-	CurrentTs            uint64   `protobuf:"varint,4,opt,name=current_ts,json=currentTs,proto3" json:"current_ts,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+    // Context 包含请求的上下文信息，如 Region ID、Peer 信息等
+    // 用于正确路由请求到对应的存储节点
+    Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+    
+    // PrimaryKey 是要检查的事务的主键
+    // 在 Percolator 模型中，每个事务都有一个主键，事务的状态由主键的状态决定
+    // 只有主键提交成功，整个事务才算成功
+    PrimaryKey           []byte   `protobuf:"bytes,2,opt,name=primary_key,json=primaryKey,proto3" json:"primary_key,omitempty"`
+    
+    // LockTs 是事务的开始时间戳（也是锁的时间戳）
+    // 用于唯一标识一个事务，与事务创建时的 start_version 相同
+    LockTs               uint64   `protobuf:"varint,3,opt,name=lock_ts,json=lockTs,proto3" json:"lock_ts,omitempty"`
+    
+    // CurrentTs 是当前的时间戳
+    // 用于判断事务是否已过期（CurrentTs - LockTs > TTL）
+    // 如果事务过期，系统会自动回滚该事务
+    CurrentTs            uint64   `protobuf:"varint,4,opt,name=current_ts,json=currentTs,proto3" json:"current_ts,omitempty"`
+    
+    // Protocol Buffers 生成的内部字段，用于序列化优化和兼容性
+    XXX_NoUnkeyedLiteral struct{} `json:"-"`
+    XXX_unrecognized     []byte   `json:"-"`
+    XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *CheckTxnStatusRequest) Reset()         { *m = CheckTxnStatusRequest{} }
@@ -1343,19 +1406,44 @@ func (m *CheckTxnStatusRequest) GetCurrentTs() uint64 {
 	return 0
 }
 
+// CheckTxnStatusResponse 定义了检查事务状态的响应结构
+// 用于返回事务的当前状态信息，并报告系统执行的清理操作
+//
+// 事务状态判断规则：
+// - 已锁定状态：lock_ttl > 0 （事务仍在进行中）
+// - 已提交状态：commit_version > 0 （事务已成功提交）
+// - 已回滚状态：lock_ttl == 0 && commit_version == 0 （事务已回滚或被清理）
+//
+// 这个响应帮助客户端了解事务的最终状态，并根据状态决定后续操作
 type CheckTxnStatusResponse struct {
-	RegionError *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
-	// Three kinds of txn status:
-	// locked: lock_ttl > 0
-	// committed: commit_version > 0
-	// rolled back: lock_ttl == 0 && commit_version == 0
-	LockTtl       uint64 `protobuf:"varint,2,opt,name=lock_ttl,json=lockTtl,proto3" json:"lock_ttl,omitempty"`
-	CommitVersion uint64 `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
-	// The action performed by TinyKV in response to the CheckTxnStatus request.
-	Action               Action   `protobuf:"varint,4,opt,name=action,proto3,enum=kvrpcpb.Action" json:"action,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+    // RegionError 表示 Region 级别的错误
+    // 当请求的 Region 不存在、权限不足或网络问题时会设置此字段
+    // 客户端收到此错误时需要重新获取 Region 信息并重试
+    RegionError *errorpb.Error `protobuf:"bytes,1,opt,name=region_error,json=regionError" json:"region_error,omitempty"`
+    
+    // LockTtl 表示事务锁的剩余生存时间（Time To Live）
+    // - 如果 > 0：事务仍然活跃，锁仍有效
+    // - 如果 == 0：事务已过期或已被清理
+    // 单位通常为毫秒或秒，具体取决于系统配置
+    LockTtl       uint64 `protobuf:"varint,2,opt,name=lock_ttl,json=lockTtl,proto3" json:"lock_ttl,omitempty"`
+    
+    // CommitVersion 表示事务的提交时间戳
+    // - 如果 > 0：事务已成功提交，这是提交时的时间戳
+    // - 如果 == 0：事务尚未提交或已被回滚
+    // 提交时间戳用于 MVCC 版本控制和读取一致性保证
+    CommitVersion uint64 `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
+    
+    // Action 表示 TinyKV 在处理 CheckTxnStatus 请求时执行的操作
+    // 可能的值包括：
+    // - NoAction: 仅查询状态，未执行清理操作
+    // - TTLExpireRollback: 因 TTL 过期而回滚了事务
+    // - LockNotExistRollback: 锁不存在时记录了回滚状态
+    Action               Action   `protobuf:"varint,4,opt,name=action,proto3,enum=kvrpcpb.Action" json:"action,omitempty"`
+    
+    // Protocol Buffers 生成的内部字段，用于序列化优化和兼容性
+    XXX_NoUnkeyedLiteral struct{} `json:"-"`
+    XXX_unrecognized     []byte   `json:"-"`
+    XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *CheckTxnStatusResponse) Reset()         { *m = CheckTxnStatusResponse{} }
@@ -1419,18 +1507,39 @@ func (m *CheckTxnStatusResponse) GetAction() Action {
 	return Action_NoAction
 }
 
-// Resolve lock will find all locks belonging to the transaction with the given start timestamp.
-// If commit_version is 0, TinyKV will rollback all locks. If commit_version is greater than
-// 0 it will commit those locks with the given commit timestamp.
-// The client will make a resolve lock request for all secondary keys once it has successfully
-// committed or rolled back the primary key.
+// ResolveLockRequest 定义了解锁请求的结构
+// 用于清理属于指定事务的所有锁，是 Percolator 事务模型中的重要操作
+//
+// 该请求的工作原理：
+// - 查找所有属于指定 start_version 的锁
+// - 根据 commit_version 的值决定锁的最终状态：
+//   * 如果 commit_version == 0：回滚所有锁
+//   * 如果 commit_version > 0：用指定的提交时间戳提交所有锁
+//
+// 在分布式事务流程中的作用：
+// 1. 当主键成功提交或回滚后，客户端会对所有次要键发起 resolve lock 请求
+// 2. 确保事务的所有锁都得到正确处理，避免锁泄露
+// 3. 维护系统的一致性和性能
 type ResolveLockRequest struct {
-	Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
-	StartVersion         uint64   `protobuf:"varint,2,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
-	CommitVersion        uint64   `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
-	XXX_NoUnkeyedLiteral struct{} `json:"-"`
-	XXX_unrecognized     []byte   `json:"-"`
-	XXX_sizecache        int32    `json:"-"`
+    // Context 包含请求的上下文信息，如 Region ID、Peer 信息等
+    // 用于将请求正确路由到对应的存储节点
+    Context              *Context `protobuf:"bytes,1,opt,name=context" json:"context,omitempty"`
+    
+    // StartVersion 是事务的开始时间戳
+    // 用于唯一标识一个事务，系统会查找所有属于该时间戳的锁
+    // 这个值与事务创建时的 start_version 相同
+    StartVersion         uint64   `protobuf:"varint,2,opt,name=start_version,json=startVersion,proto3" json:"start_version,omitempty"`
+    
+    // CommitVersion 决定锁的最终处理方式
+    // - 等于 0：表示事务需要回滚，所有相关锁都会被清理
+    // - 大于 0：表示事务已提交，所有锁会转换为对应时间戳的提交记录
+    // 这个值通常来自主键的最终状态
+    CommitVersion        uint64   `protobuf:"varint,3,opt,name=commit_version,json=commitVersion,proto3" json:"commit_version,omitempty"`
+    
+    // Protocol Buffers 生成的内部字段，用于序列化优化和兼容性
+    XXX_NoUnkeyedLiteral struct{} `json:"-"`
+    XXX_unrecognized     []byte   `json:"-"`
+    XXX_sizecache        int32    `json:"-"`
 }
 
 func (m *ResolveLockRequest) Reset()         { *m = ResolveLockRequest{} }
