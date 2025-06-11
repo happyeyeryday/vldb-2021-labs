@@ -180,14 +180,16 @@ func (a *ExecStmt) Exec(ctx context.Context) (_ sqlexec.RecordSet, err error) {
 	var e Executor
 	// Hint: step I.4.1
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	e, err = a.buildExecutor()//构建执行器
 	if err != nil {
 		return nil, err
 	}
 
 	// Hint: step I.4.2
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	err = e.Open(ctx)//调用顶层的 `Executor.Open` 方法后，会传递到其中的子 `Executor` 当中，这一操作会递归地将所有的 `Executor` 都初始化
 	if err != nil {
 		terror.Call(e.Close)
 		return nil, err
@@ -226,9 +228,10 @@ func (a *ExecStmt) handleNoDelay(ctx context.Context, e Executor) (bool, sqlexec
 	if toCheck.Schema().Len() == 0 {
 		// Hint: step I.4.3
 		// YOUR CODE HERE (lab4)
-		panic("YOUR CODE HERE")
-		//return true, r, err
-		return true, nil, nil
+		//panic("YOUR CODE HERE")
+		r, err := a.handleNoDelayExecutor(ctx, e)//如果这个 `Executor` 不会返回结果，那么它会在 `ExecStmt.handleNoDelayExecutor` 函数内部立即执行
+		return true, r, err
+		//return true, nil, nil
 	}
 
 	return false, nil, nil
@@ -242,7 +245,8 @@ func (a *ExecStmt) handleNoDelayExecutor(ctx context.Context, e Executor) (sqlex
 
 	// Hint: step I.4.3.1
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	err = Next(ctx, e, newFirstChunk(e))//通过 `Next` 函数递归执行 `Executor`
 	if err != nil {
 		return nil, err
 	}

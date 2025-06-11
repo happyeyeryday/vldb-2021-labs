@@ -178,7 +178,8 @@ func finishStmt(ctx context.Context, sctx sessionctx.Context, se *session, sessV
 		var err error
 		// Hint: step I.5.2.1
 		// YOUR CODE HERE (lab4)
-		panic("YOUR CODE HERE")
+		//panic("YOUR CODE HERE")
+		err = se.commitTxn(ctx)//提交事务
 		if err != nil {
 			if _, ok := sql.(*executor.ExecStmt).StmtNode.(*ast.CommitStmt); ok {
 				err = errors.Annotatef(err, "previous statement: %s", se.GetSessionVars().PrevStmt)
@@ -228,7 +229,8 @@ func runStmt(ctx context.Context, sctx sessionctx.Context, s sqlexec.Statement) 
 
 	// Hint: step I.3.3
 	// YOUR CODE HERE (lab4)
-	panic("YOUR CODE HERE")
+	//panic("YOUR CODE HERE")
+	rs, err = s.Exec(ctx)//执行sql
 	sessVars.TxnCtx.StatementCount++
 	if !s.IsReadOnly() {
 		// Handle the stmt commit/rollback.
@@ -239,7 +241,11 @@ func runStmt(ctx context.Context, sctx sessionctx.Context, s sqlexec.Statement) 
 				} else {
 					// Hint: step I.3.4
 					// YOUR CODE HERE (lab4)
-					panic("YOUR CODE HERE")
+					//panic("YOUR CODE HERE")
+					err = sctx.StmtCommit()//调用 `session.StmtCommit` 方法将这一条语句 Commit 到整个事务所属的 membuffer 当中去
+					if err != nil {
+						return nil, err
+					}
 				}
 			}
 		} else {
