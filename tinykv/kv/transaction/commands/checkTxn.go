@@ -153,10 +153,12 @@ func (c *CheckTxnStatus) PrepareWrites(txn *mvcc.MvccTxn) (interface{}, error) {
     return statusResponse, nil
 }
 
+// physical 用于从全局时间戳中提取物理时间部分
 func physical(ts uint64) uint64 {
-	return ts >> tsoutil.PhysicalShiftBits
+    return ts >> tsoutil.PhysicalShiftBits
 }
 
+// WillWrite 返回本次命令会写入的 key（用于调度器优化）
 func (c *CheckTxnStatus) WillWrite() [][]byte {
-	return [][]byte{c.request.PrimaryKey}
+    return [][]byte{c.request.PrimaryKey}
 }
